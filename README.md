@@ -6,6 +6,59 @@ Enhanced git worktree management with bare repository support. This plugin provi
 
 Git worktrees allow you to have multiple working directories attached to the same repository. This is particularly useful when you need to work on multiple branches at the same time without constantly switching contexts.
 
+## Workflow Examples
+
+![Demo](./demo.gif)
+
+### Starting a new project
+
+```bash
+# Clone repository with worktree setup
+gwtc https://github.com/user/repo.git
+
+# You're now in the main/master worktree
+# Create a new feature branch
+gwtw feature/awesome-feature
+
+# Work on your feature...
+# Switch back to main
+gwtw main
+```
+
+### Working on multiple branches
+
+```bash
+# Create worktree for bug fix
+gwtw bugfix/issue-123 main
+
+# In another terminal, work on a feature
+gwtw feature/new-thing main
+
+# List all your worktrees
+gwtl
+
+# Jump between them with fuzzy finder
+gwtcd
+```
+
+### Cleaning up
+
+```bash
+# Remove finished worktrees
+gwtr feature/completed-feature
+
+# Clean up references to manually deleted worktrees
+gwtp
+```
+
+## Benefits of Using Worktrees
+
+1. **No context switching**: Keep your build artifacts, node_modules, and IDE state intact per branch
+2. **Parallel work**: Run tests on one branch while developing on another
+3. **Easy comparison**: Have two branches open side-by-side for easy comparison
+4. **Cleaner workflow**: No need to stash changes when switching branches
+
+
 ## Installation
 
 ### Oh-My-Zsh
@@ -282,56 +335,6 @@ The plugin also provides some convenient aliases:
 - `gwt` → `git worktree`
 - `gwtls` → `gwtl` (list worktrees)
 - `gwtrp` → `gwtp` (prune worktrees)
-
-## Workflow Examples
-
-### Starting a new project
-
-```bash
-# Clone repository with worktree setup
-gwtc https://github.com/user/repo.git
-
-# You're now in the main/master worktree
-# Create a new feature branch
-gwtw feature/awesome-feature
-
-# Work on your feature...
-# Switch back to main
-gwtw main
-```
-
-### Working on multiple branches
-
-```bash
-# Create worktree for bug fix
-gwtw bugfix/issue-123 main
-
-# In another terminal, work on a feature
-gwtw feature/new-thing main
-
-# List all your worktrees
-gwtl
-
-# Jump between them with fuzzy finder
-gwtcd
-```
-
-### Cleaning up
-
-```bash
-# Remove finished worktrees
-gwtr feature/completed-feature
-
-# Clean up references to manually deleted worktrees
-gwtp
-```
-
-## Benefits of Using Worktrees
-
-1. **No context switching**: Keep your build artifacts, node_modules, and IDE state intact per branch
-2. **Parallel work**: Run tests on one branch while developing on another
-3. **Easy comparison**: Have two branches open side-by-side for easy comparison
-4. **Cleaner workflow**: No need to stash changes when switching branches
 
 ## License
 
