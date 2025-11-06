@@ -96,6 +96,52 @@ git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf
 
 Many commands support interactive selection with fzf when no arguments are provided. Without fzf, you'll need to provide arguments manually.
 
+## Configuration
+
+### Shared Directories
+
+You can configure directories to be shared across all worktrees. These directories will be stored in the repository root (next to `.git`) and symlinked into each worktree. This is useful for IDE configurations, build caches, or any files you want to keep synchronized across branches.
+
+**Setup:**
+
+Add the following to your `~/.zshrc` before loading the plugin:
+
+```bash
+# Example: Share IDE configs and build directories
+GWT_SHARED_DIRS=(.claude .idea .vscode node_modules)
+
+plugins=(... git-worktree)
+```
+
+**How it works:**
+
+1. When you create a worktree (using `gwtc`, `gwta`, or `gwtw`), the plugin automatically:
+   - Creates the shared directories in the repository root if they don't exist
+   - Creates symlinks in the new worktree pointing to the shared directories
+
+2. When you remove a worktree (using `gwtr` or `gwtrm`), the symlinks are cleaned up automatically
+
+**Example structure:**
+
+```
+my-repo/
+├── .git/              (bare repository)
+├── .claude/           (shared across all worktrees)
+├── .idea/             (shared across all worktrees)
+├── main/              (worktree)
+│   ├── .claude -> ../.claude
+│   └── .idea -> ../.idea
+└── feature-branch/    (worktree)
+    ├── .claude -> ../.claude
+    └── .idea -> ../.idea
+```
+
+**Benefits:**
+
+- IDE settings and configurations stay consistent across branches
+- Build caches (`node_modules`, `.gradle`, etc.) are shared, saving disk space
+- Claude Code and other tool configurations don't need to be reconfigured per branch
+
 ## Commands
 
 ### `gwtc` - Git Worktree Clone
