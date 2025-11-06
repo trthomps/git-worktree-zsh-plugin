@@ -650,16 +650,16 @@ function gwtclean() {
 
     # Remove worktree
     if git worktree remove "$worktree_path" 2>/dev/null; then
-      # Delete branch
+      # Delete branch (force delete since worktree was just removed)
       echo "🗑️  Deleting branch: $branch"
-      git branch -d "$branch" 2>/dev/null && ((removed_count++))
+      git branch -D "$branch" 2>/dev/null && ((removed_count++))
     fi
   done
 
-  # Delete branches without worktrees
+  # Delete branches without worktrees (force delete since already confirmed merged)
   for branch in "${branches_without_worktrees[@]}"; do
     echo "🗑️  Deleting branch: $branch"
-    git branch -d "$branch" 2>/dev/null && ((removed_count++))
+    git branch -D "$branch" 2>/dev/null && ((removed_count++))
   done
 
   echo ""
