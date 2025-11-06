@@ -5,7 +5,8 @@
 # These directories will be stored in the repository root and symlinked into each worktree
 # Add any directories you want shared here
 # Example: GWT_SHARED_DIRS=(.claude .idea .vscode)
-GWT_SHARED_DIRS=()
+# Can be set in .zshrc before or after this plugin loads
+: ${GWT_SHARED_DIRS:=()}
 
 # _gwt_setup_shared_dirs - Internal function to set up shared directory symlinks
 # Creates shared directories in repo root and symlinks them into the worktree
