@@ -441,10 +441,11 @@ function gwtclean() {
   echo "🔍 Finding branches merged into '$target_branch'..."
 
   # Get list of traditionally merged branches (excluding the target branch itself)
-  local traditionally_merged=$(git branch --merged "$target_branch" | grep -v "^\*" | grep -v "^  $target_branch$" | sed 's/^[* ] //')
+  # Note: git branch output uses prefixes: * (current), + (checked out in worktree), space (regular)
+  local traditionally_merged=$(git branch --merged "$target_branch" | grep -v "^\*" | sed 's/^[*+ ] //' | grep -v "^$target_branch$")
 
   # Get all local branches (excluding current and target)
-  local all_branches=$(git branch | grep -v "^\*" | grep -v "^  $target_branch$" | sed 's/^[* ] //')
+  local all_branches=$(git branch | grep -v "^\*" | sed 's/^[*+ ] //' | grep -v "^$target_branch$")
 
   # Arrays to hold different categories of branches
   local merged_branches=()
@@ -455,12 +456,16 @@ function gwtclean() {
   # Classify traditionally merged branches
   while IFS= read -r branch; do
     [[ -z "$branch" ]] && continue
+    # Extra safety: never include the target branch
+    [[ "$branch" == "$target_branch" ]] && continue
     merged_branches+=("$branch")
   done <<< "$traditionally_merged"
 
   # Check remaining branches for squash merges and remote deletion
   while IFS= read -r branch; do
     [[ -z "$branch" ]] && continue
+    # Extra safety: never include the target branch
+    [[ "$branch" == "$target_branch" ]] && continue
 
     # Skip if already in merged_branches
     if [[ " ${merged_branches[@]} " =~ " ${branch} " ]]; then
@@ -473,7 +478,9 @@ function gwtclean() {
 
     # Check if branch name appears in recent merge commits (squash merge detection)
     # Look for patterns like "Merge pull request" or "Merge branch" with the branch name
-    if git log "$target_branch" --oneline --grep="$branch" -i --all-match -E -n 20 | grep -qiE "(merge|squash)"; then
+    # Escape special regex characters in branch name to prevent regex errors
+    local escaped_branch=$(printf '%s\n' "$branch" | sed 's/[[\.*^$()+?{|]/\\&/g')
+    if git log "$target_branch" --oneline --grep="$escaped_branch" -i --all-match -E -n 20 | grep -qiE "(merge|squash)"; then
       is_squash_merged=true
     fi
 
@@ -561,14 +568,19 @@ function gwtclean() {
   local unpushed_to_delete=()
   if [[ ${#unpushed_remote_deleted_branches[@]} -gt 0 ]]; then
     if [[ $force -eq 0 ]]; then
-      echo "⚠️  The following branches were never pushed to remote:"
-      printf '  • %s\n' "${unpushed_remote_deleted_branches[@]}"
+      echo "⚠️  The following branches were never pushed to remote."
+      echo "   Review each one to decide whether to delete it:"
       echo ""
-      echo -n "Include these unpushed branches in cleanup? [y/N] "
-      read -r response
-      if [[ "$response" =~ ^[Yy]$ ]]; then
-        unpushed_to_delete=("${unpushed_remote_deleted_branches[@]}")
-      fi
+
+      for branch in "${unpushed_remote_deleted_branches[@]}"; do
+        echo -n "Delete '$branch'? [y/N] "
+        read -r response
+        if [[ "$response" =~ ^[Yy]$ ]]; then
+          unpushed_to_delete+=("$branch")
+        fi
+      done
+
+      echo ""
     else
       # In force mode, include unpushed branches with a warning
       echo "⚠️  Force mode: including unpushed branches in cleanup"
