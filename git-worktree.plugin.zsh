@@ -380,7 +380,282 @@ function gwtw() {
   fi
 }
 
+# gwtclean - Git Worktree Clean
+# Clean up worktrees for branches that have been merged
+# Usage: gwtclean [target-branch] [-f]
+# Auto-detects the default branch if not specified
+# -f flag will skip confirmation and automatically clean up merged branches
+function gwtclean() {
+  local target_branch=""
+  local force=0
+
+  # Parse arguments
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -f|--force)
+        force=1
+        shift
+        ;;
+      *)
+        target_branch="$1"
+        shift
+        ;;
+    esac
+  done
+
+  # Find the repository root
+  local repo_root=$(git rev-parse --git-common-dir 2>/dev/null)
+  if [[ -n "$repo_root" ]]; then
+    repo_root=$(cd "$(dirname "$repo_root")" && pwd)
+  else
+    echo "❌ Not in a git repository"
+    return 1
+  fi
+
+  # Auto-detect target branch if not specified
+  if [[ -z "$target_branch" ]]; then
+    # Try to get the default branch from remote
+    target_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+
+    # Fallback: check for common default branch names
+    if [[ -z "$target_branch" ]]; then
+      if git show-ref --verify --quiet refs/heads/main; then
+        target_branch="main"
+      elif git show-ref --verify --quiet refs/heads/master; then
+        target_branch="master"
+      else
+        echo "❌ Could not auto-detect default branch. Please specify: gwtclean <branch-name>"
+        return 1
+      fi
+    fi
+
+    echo "🎯 Auto-detected target branch: $target_branch"
+  fi
+
+  # Verify target branch exists
+  if ! git show-ref --verify --quiet "refs/heads/$target_branch"; then
+    echo "❌ Target branch '$target_branch' does not exist"
+    return 1
+  fi
+
+  echo "🔍 Finding branches merged into '$target_branch'..."
+
+  # Get list of traditionally merged branches (excluding the target branch itself)
+  local traditionally_merged=$(git branch --merged "$target_branch" | grep -v "^\*" | grep -v "^  $target_branch$" | sed 's/^[* ] //')
+
+  # Get all local branches (excluding current and target)
+  local all_branches=$(git branch | grep -v "^\*" | grep -v "^  $target_branch$" | sed 's/^[* ] //')
+
+  # Arrays to hold different categories of branches
+  local merged_branches=()
+  local squash_merged_branches=()
+  local remote_deleted_branches=()
+  local unpushed_remote_deleted_branches=()
+
+  # Classify traditionally merged branches
+  while IFS= read -r branch; do
+    [[ -z "$branch" ]] && continue
+    merged_branches+=("$branch")
+  done <<< "$traditionally_merged"
+
+  # Check remaining branches for squash merges and remote deletion
+  while IFS= read -r branch; do
+    [[ -z "$branch" ]] && continue
+
+    # Skip if already in merged_branches
+    if [[ " ${merged_branches[@]} " =~ " ${branch} " ]]; then
+      continue
+    fi
+
+    local is_squash_merged=false
+    local remote_exists=false
+    local has_upstream=false
+
+    # Check if branch name appears in recent merge commits (squash merge detection)
+    # Look for patterns like "Merge pull request" or "Merge branch" with the branch name
+    if git log "$target_branch" --oneline --grep="$branch" -i --all-match -E -n 20 | grep -qiE "(merge|squash)"; then
+      is_squash_merged=true
+    fi
+
+    # Check if branch exists on remote
+    if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+      remote_exists=true
+    fi
+
+    # Check if branch has upstream tracking
+    if git rev-parse --abbrev-ref "$branch@{upstream}" &>/dev/null; then
+      has_upstream=true
+    fi
+
+    # Categorize the branch
+    if [[ "$is_squash_merged" == true ]]; then
+      squash_merged_branches+=("$branch")
+    elif [[ "$has_upstream" == true ]] && [[ "$remote_exists" == false ]]; then
+      # Branch was tracking remote but remote is deleted - likely merged
+      remote_deleted_branches+=("$branch")
+    elif [[ "$has_upstream" == false ]] && [[ "$remote_exists" == false ]]; then
+      # Branch never pushed and remote doesn't exist - needs confirmation
+      unpushed_remote_deleted_branches+=("$branch")
+    fi
+  done <<< "$all_branches"
+
+  # Combine all detected merged branches for processing
+  local all_detected_merged=("${merged_branches[@]}" "${squash_merged_branches[@]}" "${remote_deleted_branches[@]}")
+
+  if [[ ${#all_detected_merged[@]} -eq 0 ]] && [[ ${#unpushed_remote_deleted_branches[@]} -eq 0 ]]; then
+    echo "✨ No merged branches found"
+    return 0
+  fi
+
+  # Display findings
+  if [[ ${#merged_branches[@]} -gt 0 ]]; then
+    echo ""
+    echo "📋 Traditionally merged branches:"
+    printf '  • %s\n' "${merged_branches[@]}"
+  fi
+
+  if [[ ${#squash_merged_branches[@]} -gt 0 ]]; then
+    echo ""
+    echo "🔀 Squash-merged branches (detected from commit messages):"
+    printf '  • %s\n' "${squash_merged_branches[@]}"
+  fi
+
+  if [[ ${#remote_deleted_branches[@]} -gt 0 ]]; then
+    echo ""
+    echo "🌐 Branches with deleted remotes (likely merged):"
+    printf '  • %s\n' "${remote_deleted_branches[@]}"
+  fi
+
+  if [[ ${#unpushed_remote_deleted_branches[@]} -gt 0 ]]; then
+    echo ""
+    echo "⚠️  Unpushed local branches (need confirmation):"
+    printf '  • %s\n' "${unpushed_remote_deleted_branches[@]}"
+  fi
+
+  echo ""
+
+  # Find worktrees for detected merged branches
+  local worktrees_to_remove=()
+  local branches_to_delete=()
+  local branches_without_worktrees=()
+
+  for branch in "${all_detected_merged[@]}"; do
+    [[ -z "$branch" ]] && continue
+
+    # Check if worktree exists for this branch
+    local worktree_path="$repo_root/$branch"
+    if [[ -d "$worktree_path" ]]; then
+      # Verify it's actually a worktree
+      if git worktree list --porcelain | grep -q "^worktree $worktree_path$"; then
+        worktrees_to_remove+=("$worktree_path")
+        branches_to_delete+=("$branch")
+      else
+        branches_without_worktrees+=("$branch")
+      fi
+    else
+      branches_without_worktrees+=("$branch")
+    fi
+  done
+
+  # Handle unpushed branches separately with confirmation
+  local unpushed_to_delete=()
+  if [[ ${#unpushed_remote_deleted_branches[@]} -gt 0 ]]; then
+    if [[ $force -eq 0 ]]; then
+      echo "⚠️  The following branches were never pushed to remote:"
+      printf '  • %s\n' "${unpushed_remote_deleted_branches[@]}"
+      echo ""
+      echo -n "Include these unpushed branches in cleanup? [y/N] "
+      read -r response
+      if [[ "$response" =~ ^[Yy]$ ]]; then
+        unpushed_to_delete=("${unpushed_remote_deleted_branches[@]}")
+      fi
+    else
+      # In force mode, include unpushed branches with a warning
+      echo "⚠️  Force mode: including unpushed branches in cleanup"
+      unpushed_to_delete=("${unpushed_remote_deleted_branches[@]}")
+    fi
+
+    # Add unpushed branches to the appropriate lists
+    for branch in "${unpushed_to_delete[@]}"; do
+      local worktree_path="$repo_root/$branch"
+      if [[ -d "$worktree_path" ]] && git worktree list --porcelain | grep -q "^worktree $worktree_path$"; then
+        worktrees_to_remove+=("$worktree_path")
+        branches_to_delete+=("$branch")
+      else
+        branches_without_worktrees+=("$branch")
+      fi
+    done
+  fi
+
+  # Check if there's anything to clean up
+  if [[ ${#worktrees_to_remove[@]} -eq 0 ]] && [[ ${#branches_without_worktrees[@]} -eq 0 ]]; then
+    echo "✨ No branches to clean up"
+    return 0
+  fi
+
+  # Display what will be removed
+  if [[ ${#worktrees_to_remove[@]} -gt 0 ]]; then
+    echo "🗑️  Worktrees to remove:"
+    for i in {1..${#worktrees_to_remove[@]}}; do
+      echo "  • ${branches_to_delete[$i]} → ${worktrees_to_remove[$i]}"
+    done
+    echo ""
+  fi
+
+  if [[ ${#branches_without_worktrees[@]} -gt 0 ]]; then
+    echo "🗑️  Branches to delete (no worktrees):"
+    printf '  • %s\n' "${branches_without_worktrees[@]}"
+    echo ""
+  fi
+
+  # Confirm unless force flag is set
+  if [[ $force -eq 0 ]]; then
+    local total_count=$((${#worktrees_to_remove[@]} + ${#branches_without_worktrees[@]}))
+    echo -n "Remove $total_count branch(es) and their worktrees? [y/N] "
+    read -r response
+    if [[ ! "$response" =~ ^[Yy]$ ]]; then
+      echo "Cancelled"
+      return 0
+    fi
+  fi
+
+  # Remove worktrees and delete branches
+  local removed_count=0
+
+  for i in {1..${#worktrees_to_remove[@]}}; do
+    local worktree_path="${worktrees_to_remove[$i]}"
+    local branch="${branches_to_delete[$i]}"
+
+    echo "🗑️  Removing worktree: $worktree_path"
+
+    # Remove shared directory symlinks
+    for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
+      local symlink_path="$worktree_path/$shared_dir"
+      if [[ -L "$symlink_path" ]]; then
+        rm "$symlink_path"
+      fi
+    done
+
+    # Remove worktree
+    if git worktree remove "$worktree_path" 2>/dev/null; then
+      # Delete branch
+      echo "🗑️  Deleting branch: $branch"
+      git branch -d "$branch" 2>/dev/null && ((removed_count++))
+    fi
+  done
+
+  # Delete branches without worktrees
+  for branch in "${branches_without_worktrees[@]}"; do
+    echo "🗑️  Deleting branch: $branch"
+    git branch -d "$branch" 2>/dev/null && ((removed_count++))
+  done
+
+  echo ""
+  echo "✅ Cleanup complete - removed $removed_count branch(es) and worktree(s)"
+}
+
 # Aliases for shorter commands
 alias gwt="git worktree"
 alias gwtls="gwtl"
 alias gwtrp="gwtp"
+alias gwtcl="gwtclean"

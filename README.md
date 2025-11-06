@@ -47,6 +47,9 @@ gwtcd
 # Remove finished worktrees
 gwtr feature/completed-feature
 
+# Clean up merged branches and their worktrees
+gwtclean
+
 # Clean up references to manually deleted worktrees
 gwtp
 ```
@@ -374,6 +377,56 @@ gwtunlock
 
 ---
 
+### `gwtclean` - Git Worktree Clean
+
+Clean up worktrees and branches that have been merged into the default branch. Automatically detects the default branch (main/master) or you can specify a target branch. **Supports detection of squash merges!**
+
+**Usage:**
+```bash
+gwtclean [target-branch] [-f]
+```
+
+**Options:**
+- `-f` or `--force`: Skip confirmation and automatically clean up
+
+**Examples:**
+```bash
+# Auto-detect default branch and clean up merged branches
+gwtclean
+
+# Clean up branches merged into specific branch
+gwtclean develop
+
+# Force cleanup without confirmation
+gwtclean -f
+
+# Clean branches merged into develop without confirmation
+gwtclean develop -f
+```
+
+**What it does:**
+1. Auto-detects the default branch (main/master) if not specified
+2. Finds branches merged into the target branch using multiple detection methods:
+   - **Traditional merges**: Branches merged with commit history preserved
+   - **Squash merges**: Detects branches mentioned in merge commit messages
+   - **Remote-deleted branches**: Branches whose remote was deleted (likely merged)
+   - **Unpushed branches**: Local-only branches (asks for separate confirmation)
+3. Lists worktrees associated with those merged branches
+4. Removes both the worktrees and deletes the local branches
+5. Handles branches without worktrees separately
+
+**Safety features:**
+- Asks for confirmation before deletion (unless `-f` flag is used)
+- **Separately confirms unpushed local branches** before including them in cleanup
+- Uses safe delete (`git branch -d`) which prevents deletion of unmerged changes
+- Skips the current branch and target branch
+- Properly cleans up shared directory symlinks
+- Shows categorized lists of branches found (traditional, squash-merged, remote-deleted, unpushed)
+
+**Alias:** `gwtcl`
+
+---
+
 ## Aliases
 
 The plugin also provides some convenient aliases:
@@ -381,6 +434,7 @@ The plugin also provides some convenient aliases:
 - `gwt` → `git worktree`
 - `gwtls` → `gwtl` (list worktrees)
 - `gwtrp` → `gwtp` (prune worktrees)
+- `gwtcl` → `gwtclean` (clean merged branches)
 
 ## License
 
