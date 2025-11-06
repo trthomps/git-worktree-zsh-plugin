@@ -1,6 +1,54 @@
 # git-worktree.plugin.zsh
 # Enhanced git worktree management with bare repository support
 
+# Configuration: Directories to share across worktrees
+# These directories will be stored in the repository root and symlinked into each worktree
+# Add any directories you want shared here
+# Example: GWT_SHARED_DIRS=(.claude .idea .vscode)
+GWT_SHARED_DIRS=()
+
+# _gwt_setup_shared_dirs - Internal function to set up shared directory symlinks
+# Creates shared directories in repo root and symlinks them into the worktree
+# Usage: _gwt_setup_shared_dirs <worktree-path>
+function _gwt_setup_shared_dirs() {
+  local worktree_path="$1"
+
+  if [[ -z "$worktree_path" ]] || [[ ! -d "$worktree_path" ]]; then
+    return 1
+  fi
+
+  # Find the repository root (where .git is)
+  local repo_root=$(git rev-parse --git-common-dir 2>/dev/null)
+  if [[ -n "$repo_root" ]]; then
+    repo_root=$(cd "$(dirname "$repo_root")" && pwd)
+  else
+    return 1
+  fi
+
+  # Process each shared directory
+  for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
+    local root_shared_path="$repo_root/$shared_dir"
+    local worktree_shared_path="$worktree_path/$shared_dir"
+
+    # Create the shared directory in repo root if it doesn't exist
+    if [[ ! -e "$root_shared_path" ]]; then
+      mkdir -p "$root_shared_path"
+    fi
+
+    # Remove any existing file/directory in the worktree at this location
+    if [[ -e "$worktree_shared_path" ]] && [[ ! -L "$worktree_shared_path" ]]; then
+      echo "  ℹ️  Removing existing $shared_dir directory in worktree"
+      rm -rf "$worktree_shared_path"
+    fi
+
+    # Create symlink if it doesn't already exist
+    if [[ ! -L "$worktree_shared_path" ]]; then
+      ln -s "$root_shared_path" "$worktree_shared_path"
+      echo "  🔗 Linked $shared_dir to shared directory"
+    fi
+  done
+}
+
 # gwtc - Git Worktree Clone
 # Clone a repository as bare and set up main worktree
 # Usage: gwtc <repo-url> [directory-name]
@@ -44,6 +92,10 @@ function gwtc() {
 
   echo "🌿 Creating main worktree for branch: $default_branch"
   git worktree add "$default_branch" "$default_branch" || return 1
+
+  # Set up shared directories before changing into worktree
+  local worktree_full_path="$(pwd)/$default_branch"
+  _gwt_setup_shared_dirs "$worktree_full_path"
 
   cd "$default_branch" || return 1
 
@@ -90,6 +142,7 @@ function gwta() {
 
   if [[ $? -eq 0 ]]; then
     echo "✅ Worktree created at: $repo_root/$branch_name"
+    _gwt_setup_shared_dirs "$repo_root/$branch_name"
   fi
 }
 
@@ -123,6 +176,14 @@ function gwtr() {
     fi
   fi
 
+  # Remove shared directory symlinks before removing worktree
+  for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
+    local symlink_path="$worktree_path/$shared_dir"
+    if [[ -L "$symlink_path" ]]; then
+      rm "$symlink_path"
+    fi
+  done
+
   echo "🗑️  Removing worktree: $worktree_path"
   git worktree remove "$worktree_path"
 }
@@ -148,6 +209,14 @@ function gwtrm() {
       return 1
     fi
   fi
+
+  # Remove shared directory symlinks before removing worktree
+  for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
+    local symlink_path="$worktree_path/$shared_dir"
+    if [[ -L "$symlink_path" ]]; then
+      rm "$symlink_path"
+    fi
+  done
 
   echo "⚠️  Force removing worktree: $worktree_path"
   git worktree remove --force "$worktree_path"
@@ -305,6 +374,7 @@ function gwtw() {
 
   if [[ $? -eq 0 ]]; then
     echo "✅ Worktree ready at: $repo_root/$branch_name"
+    _gwt_setup_shared_dirs "$repo_root/$branch_name"
     cd "$repo_root/$branch_name"
   fi
 }
