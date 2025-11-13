@@ -8,7 +8,7 @@ Git worktrees allow you to have multiple working directories attached to the sam
 
 ## Workflow Examples
 
-![Demo](./demo.gif)
+![Demo](https://github.com/trthomps/git-worktree-zsh-plugin/releases/download/assets/demo.gif)
 
 ### Starting a new project
 
