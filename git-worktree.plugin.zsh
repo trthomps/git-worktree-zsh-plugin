@@ -6,7 +6,9 @@
 # Add any directories you want shared here
 # Example: GWT_SHARED_DIRS=(.claude .idea .vscode)
 # Can be set in .zshrc before or after this plugin loads
-: ${GWT_SHARED_DIRS:=()}
+if [[ ! -v GWT_SHARED_DIRS ]]; then
+  GWT_SHARED_DIRS=()
+fi
 
 # _gwt_setup_shared_dirs - Internal function to set up shared directory symlinks
 # Creates shared directories in repo root and symlinks them into the worktree
@@ -28,6 +30,11 @@ function _gwt_setup_shared_dirs() {
 
   # Process each shared directory
   for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
+    # Skip empty or invalid directory names
+    if [[ -z "$shared_dir" ]] || [[ "$shared_dir" == "()" ]]; then
+      continue
+    fi
+
     local root_shared_path="$repo_root/$shared_dir"
     local worktree_shared_path="$worktree_path/$shared_dir"
 
@@ -179,6 +186,11 @@ function gwtr() {
 
   # Remove shared directory symlinks before removing worktree
   for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
+    # Skip empty or invalid directory names
+    if [[ -z "$shared_dir" ]] || [[ "$shared_dir" == "()" ]]; then
+      continue
+    fi
+
     local symlink_path="$worktree_path/$shared_dir"
     if [[ -L "$symlink_path" ]]; then
       rm "$symlink_path"
@@ -213,6 +225,11 @@ function gwtrm() {
 
   # Remove shared directory symlinks before removing worktree
   for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
+    # Skip empty or invalid directory names
+    if [[ -z "$shared_dir" ]] || [[ "$shared_dir" == "()" ]]; then
+      continue
+    fi
+
     local symlink_path="$worktree_path/$shared_dir"
     if [[ -L "$symlink_path" ]]; then
       rm "$symlink_path"
@@ -642,6 +659,11 @@ function gwtclean() {
 
     # Remove shared directory symlinks
     for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
+      # Skip empty or invalid directory names
+      if [[ -z "$shared_dir" ]] || [[ "$shared_dir" == "()" ]]; then
+        continue
+      fi
+
       local symlink_path="$worktree_path/$shared_dir"
       if [[ -L "$symlink_path" ]]; then
         rm "$symlink_path"
