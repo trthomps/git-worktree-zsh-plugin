@@ -99,6 +99,12 @@ git clone --depth 1 https://github.com/junegunn/fzf.git ~/.fzf
 
 Many commands support interactive selection with fzf when no arguments are provided. Without fzf, you'll need to provide arguments manually.
 
+## Keeping the Plugin Updated
+
+To automatically update this plugin along with Oh-My-Zsh itself, consider using [OhMyZsh-full-autoupdate](https://github.com/Pilaton/OhMyZsh-full-autoupdate). This tool extends Oh-My-Zsh's built-in update mechanism to also update all custom plugins and themes automatically.
+
+Installation is simple - just add it as another custom plugin, and it will handle updates for all your custom plugins including this one.
+
 ## Configuration
 
 ### Shared Directories
