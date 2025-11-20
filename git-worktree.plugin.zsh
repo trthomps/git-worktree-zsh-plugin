@@ -77,6 +77,9 @@ function gwtc() {
 
   cd "$dir_name" || return 1
 
+  # Configure remote to fetch all branches (bare clones don't set this up by default)
+  git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+
   # Get the default branch name by querying the remote
   # This works in a bare repository
   local default_branch=$(git ls-remote --symref origin HEAD | awk '/^ref:/ {sub(/refs\/heads\//, "", $2); print $2}')
@@ -99,7 +102,8 @@ function gwtc() {
   fi
 
   echo "🌿 Creating main worktree for branch: $default_branch"
-  git worktree add "$default_branch" "$default_branch" || return 1
+  # Create worktree with tracking to remote branch
+  git worktree add --track -b "$default_branch" "$default_branch" "origin/$default_branch" || return 1
 
   # Set up shared directories before changing into worktree
   local worktree_full_path="$(pwd)/$default_branch"
@@ -143,6 +147,16 @@ function gwta() {
   elif git show-ref --verify --quiet "refs/heads/$branch_name"; then
     echo "🌿 Checking out existing branch '$branch_name'"
     (cd "$repo_root" && git worktree add "$branch_name" "$branch_name")
+    # Set up tracking if remote branch exists and not already tracking
+    if git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
+      if ! git rev-parse --abbrev-ref "$branch_name@{upstream}" &>/dev/null; then
+        echo "🔗 Setting up tracking to origin/$branch_name"
+        (cd "$repo_root/$branch_name" && git branch --set-upstream-to=origin/$branch_name)
+      fi
+    fi
+  elif git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
+    echo "🌿 Branch '$branch_name' exists on remote, creating worktree with tracking..."
+    (cd "$repo_root" && git worktree add --track -b "$branch_name" "$branch_name" "origin/$branch_name")
   else
     echo "❌ Branch '$branch_name' doesn't exist. Use 'gwta $branch_name -b' to create it."
     return 1
@@ -382,9 +396,16 @@ function gwtw() {
   if git show-ref --verify --quiet "refs/heads/$branch_name"; then
     echo "🌿 Branch '$branch_name' exists, creating worktree..."
     (cd "$repo_root" && git worktree add "$branch_name" "$branch_name")
+    # Set up tracking if remote branch exists and not already tracking
+    if git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
+      if ! git rev-parse --abbrev-ref "$branch_name@{upstream}" &>/dev/null; then
+        echo "🔗 Setting up tracking to origin/$branch_name"
+        (cd "$repo_root/$branch_name" && git branch --set-upstream-to=origin/$branch_name)
+      fi
+    fi
   elif git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
-    echo "🌿 Branch '$branch_name' exists on remote, creating worktree..."
-    (cd "$repo_root" && git worktree add "$branch_name" "$branch_name")
+    echo "🌿 Branch '$branch_name' exists on remote, creating worktree with tracking..."
+    (cd "$repo_root" && git worktree add --track -b "$branch_name" "$branch_name" "origin/$branch_name")
   else
     echo "🌱 Creating new branch '$branch_name' from $base_branch..."
     (cd "$repo_root" && git worktree add -b "$branch_name" "$branch_name" "$base_branch")
