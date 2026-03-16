@@ -10,7 +10,75 @@ if [[ ! -v GWT_SHARED_DIRS ]]; then
   GWT_SHARED_DIRS=()
 fi
 
-# _gwt_setup_shared_dirs - Internal function to set up shared directory symlinks
+# --- Internal helpers ---
+
+# _gwt_repo_root - Resolve the bare repository root (parent of .git)
+# Prints the path to stdout. Returns 1 if not in a git repo.
+function _gwt_repo_root() {
+  local git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
+  if [[ -n "$git_common_dir" ]]; then
+    (cd "$(dirname "$git_common_dir")" && pwd)
+  else
+    return 1
+  fi
+}
+
+# _gwt_default_branch - Detect the default branch name
+# Checks origin/HEAD, then falls back to main, then master.
+# Prints the branch name to stdout. Returns 1 if detection fails.
+function _gwt_default_branch() {
+  local branch
+  branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+  if [[ -n "$branch" ]]; then
+    echo "$branch"
+    return 0
+  fi
+
+  if git show-ref --verify --quiet refs/heads/main 2>/dev/null; then
+    echo "main"
+  elif git show-ref --verify --quiet refs/heads/master 2>/dev/null; then
+    echo "master"
+  else
+    return 1
+  fi
+}
+
+# _gwt_select_worktree - Interactive worktree selector via fzf
+# Usage: _gwt_select_worktree <prompt>
+# Prints the selected worktree path to stdout. Returns 1 if nothing selected or fzf unavailable.
+function _gwt_select_worktree() {
+  local prompt="${1:-Select worktree: }"
+
+  if ! command -v fzf &> /dev/null; then
+    return 1
+  fi
+
+  local selection
+  selection=$(git worktree list --porcelain | grep "worktree " | sed 's/worktree //' | grep -v '\.git$' | fzf --height 40% --reverse --prompt "$prompt")
+
+  if [[ -z "$selection" ]]; then
+    return 1
+  fi
+
+  echo "$selection"
+}
+
+# _gwt_cleanup_shared_dirs - Remove shared directory symlinks from a worktree
+# Usage: _gwt_cleanup_shared_dirs <worktree-path>
+function _gwt_cleanup_shared_dirs() {
+  local worktree_path="$1"
+  for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
+    if [[ -z "$shared_dir" ]] || [[ "$shared_dir" == "()" ]]; then
+      continue
+    fi
+    local symlink_path="$worktree_path/$shared_dir"
+    if [[ -L "$symlink_path" ]]; then
+      rm "$symlink_path"
+    fi
+  done
+}
+
+# _gwt_setup_shared_dirs - Set up shared directory symlinks in a worktree
 # Creates shared directories in repo root and symlinks them into the worktree
 # Usage: _gwt_setup_shared_dirs <worktree-path>
 function _gwt_setup_shared_dirs() {
@@ -20,17 +88,9 @@ function _gwt_setup_shared_dirs() {
     return 1
   fi
 
-  # Find the repository root (where .git is)
-  local repo_root=$(git rev-parse --git-common-dir 2>/dev/null)
-  if [[ -n "$repo_root" ]]; then
-    repo_root=$(cd "$(dirname "$repo_root")" && pwd)
-  else
-    return 1
-  fi
+  local repo_root=$(_gwt_repo_root) || return 1
 
-  # Process each shared directory
   for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
-    # Skip empty or invalid directory names
     if [[ -z "$shared_dir" ]] || [[ "$shared_dir" == "()" ]]; then
       continue
     fi
@@ -57,6 +117,22 @@ function _gwt_setup_shared_dirs() {
   done
 }
 
+# _gwt_setup_tracking - Set up branch tracking to origin if applicable
+# Usage: _gwt_setup_tracking <branch-name> <worktree-path>
+function _gwt_setup_tracking() {
+  local branch_name="$1"
+  local worktree_path="$2"
+
+  if git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
+    if ! git rev-parse --abbrev-ref "$branch_name@{upstream}" &>/dev/null; then
+      echo "🔗 Setting up tracking to origin/$branch_name"
+      (cd "$worktree_path" && git branch --set-upstream-to=origin/$branch_name)
+    fi
+  fi
+}
+
+# --- Public commands ---
+
 # gwtc - Git Worktree Clone
 # Clone a repository as bare and set up main worktree
 # Usage: gwtc <repo-url> [directory-name]
@@ -81,17 +157,15 @@ function gwtc() {
   git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
 
   # Get the default branch name by querying the remote
-  # This works in a bare repository
   local default_branch=$(git ls-remote --symref origin HEAD | awk '/^ref:/ {sub(/refs\/heads\//, "", $2); print $2}')
 
-  # Fallback: check for common default branch names
+  # Fallback: check for common default branch names on remote refs
   if [[ -z "$default_branch" ]]; then
     if git show-ref --verify --quiet refs/remotes/origin/main; then
       default_branch="main"
     elif git show-ref --verify --quiet refs/remotes/origin/master; then
       default_branch="master"
     else
-      # Last resort: get the first branch from refs
       default_branch=$(git for-each-ref --format='%(refname:short)' refs/remotes/origin/ | grep -v 'HEAD' | head -n1 | sed 's@origin/@@')
     fi
   fi
@@ -102,10 +176,8 @@ function gwtc() {
   fi
 
   echo "🌿 Creating main worktree for branch: $default_branch"
-  # Create worktree with tracking to remote branch
   git worktree add --track -b "$default_branch" "$default_branch" "origin/$default_branch" || return 1
 
-  # Set up shared directories before changing into worktree
   local worktree_full_path="$(pwd)/$default_branch"
   _gwt_setup_shared_dirs "$worktree_full_path"
 
@@ -127,33 +199,32 @@ function gwta() {
   fi
 
   local branch_name="$1"
-  local create_branch=""
-  local base_branch="HEAD"
-
-  # Find the repository root (where .git is)
-  local repo_root=$(git rev-parse --git-common-dir 2>/dev/null)
-  if [[ -n "$repo_root" ]]; then
-    repo_root=$(cd "$(dirname "$repo_root")" && pwd)
-  else
+  local repo_root=$(_gwt_repo_root)
+  if [[ -z "$repo_root" ]]; then
     repo_root=$(pwd)
   fi
 
-  # Check for -b flag
   if [[ "$2" == "-b" ]]; then
-    create_branch="-b"
-    base_branch="${3:-HEAD}"
-    echo "🌱 Creating new branch '$branch_name' from $base_branch"
-    (cd "$repo_root" && git worktree add $create_branch "$branch_name" "$base_branch")
+    local base_branch="${3:-HEAD}"
+    # Fetch the latest base branch from origin before branching
+    if [[ "$base_branch" != "HEAD" ]]; then
+      echo "📡 Fetching latest '$base_branch' from origin..."
+      (cd "$repo_root" && git fetch origin "$base_branch" 2>/dev/null)
+      if git show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
+        echo "🌱 Creating new branch '$branch_name' from origin/$base_branch"
+        (cd "$repo_root" && git worktree add -b "$branch_name" "$branch_name" "origin/$base_branch")
+      else
+        echo "⚠️  Remote branch 'origin/$base_branch' not found, using local '$base_branch'"
+        (cd "$repo_root" && git worktree add -b "$branch_name" "$branch_name" "$base_branch")
+      fi
+    else
+      echo "🌱 Creating new branch '$branch_name' from $base_branch"
+      (cd "$repo_root" && git worktree add -b "$branch_name" "$branch_name" "$base_branch")
+    fi
   elif git show-ref --verify --quiet "refs/heads/$branch_name"; then
     echo "🌿 Checking out existing branch '$branch_name'"
     (cd "$repo_root" && git worktree add "$branch_name" "$branch_name")
-    # Set up tracking if remote branch exists and not already tracking
-    if git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
-      if ! git rev-parse --abbrev-ref "$branch_name@{upstream}" &>/dev/null; then
-        echo "🔗 Setting up tracking to origin/$branch_name"
-        (cd "$repo_root/$branch_name" && git branch --set-upstream-to=origin/$branch_name)
-      fi
-    fi
+    _gwt_setup_tracking "$branch_name" "$repo_root/$branch_name"
   elif git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
     echo "🌿 Branch '$branch_name' exists on remote, creating worktree with tracking..."
     (cd "$repo_root" && git worktree add --track -b "$branch_name" "$branch_name" "origin/$branch_name")
@@ -182,15 +253,8 @@ function gwtr() {
   local worktree_path="$1"
 
   if [[ -z "$worktree_path" ]]; then
-    if command -v fzf &> /dev/null; then
-      # Get list of worktrees, skip the bare repo entry
-      worktree_path=$(git worktree list --porcelain | grep "worktree " | sed 's/worktree //' | grep -v '\.git$' | fzf --height 40% --reverse --prompt "Select worktree to remove: ")
-
-      if [[ -z "$worktree_path" ]]; then
-        echo "No worktree selected"
-        return 1
-      fi
-    else
+    worktree_path=$(_gwt_select_worktree "Select worktree to remove: ")
+    if [[ -z "$worktree_path" ]]; then
       echo "Usage: gwtr <worktree-path>"
       echo "Available worktrees:"
       git worktree list
@@ -198,19 +262,7 @@ function gwtr() {
     fi
   fi
 
-  # Remove shared directory symlinks before removing worktree
-  for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
-    # Skip empty or invalid directory names
-    if [[ -z "$shared_dir" ]] || [[ "$shared_dir" == "()" ]]; then
-      continue
-    fi
-
-    local symlink_path="$worktree_path/$shared_dir"
-    if [[ -L "$symlink_path" ]]; then
-      rm "$symlink_path"
-    fi
-  done
-
+  _gwt_cleanup_shared_dirs "$worktree_path"
   echo "🗑️  Removing worktree: $worktree_path"
   git worktree remove "$worktree_path"
 }
@@ -223,33 +275,14 @@ function gwtrm() {
   local worktree_path="$1"
 
   if [[ -z "$worktree_path" ]]; then
-    if command -v fzf &> /dev/null; then
-      # Get list of worktrees, skip the bare repo entry
-      worktree_path=$(git worktree list --porcelain | grep "worktree " | sed 's/worktree //' | grep -v '\.git$' | fzf --height 40% --reverse --prompt "Select worktree to force remove: ")
-
-      if [[ -z "$worktree_path" ]]; then
-        echo "No worktree selected"
-        return 1
-      fi
-    else
+    worktree_path=$(_gwt_select_worktree "Select worktree to force remove: ")
+    if [[ -z "$worktree_path" ]]; then
       echo "Usage: gwtrm <worktree-path>"
       return 1
     fi
   fi
 
-  # Remove shared directory symlinks before removing worktree
-  for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
-    # Skip empty or invalid directory names
-    if [[ -z "$shared_dir" ]] || [[ "$shared_dir" == "()" ]]; then
-      continue
-    fi
-
-    local symlink_path="$worktree_path/$shared_dir"
-    if [[ -L "$symlink_path" ]]; then
-      rm "$symlink_path"
-    fi
-  done
-
+  _gwt_cleanup_shared_dirs "$worktree_path"
   echo "⚠️  Force removing worktree: $worktree_path"
   git worktree remove --force "$worktree_path"
 }
@@ -265,13 +298,16 @@ function gwtp() {
 # Fuzzy find and cd into a worktree
 function gwtcd() {
   local worktree_path
+  worktree_path=$(_gwt_select_worktree "Select worktree: ")
 
-  # Get list of worktrees, skip the header and bare repo entry
-  worktree_path=$(git worktree list --porcelain | grep "worktree " | sed 's/worktree //' | fzf --height 40% --reverse --prompt "Select worktree: ")
-
-  if [[ -n "$worktree_path" ]]; then
-    cd "$worktree_path"
+  if [[ -z "$worktree_path" ]]; then
+    echo "❌ fzf is required for gwtcd. Install it or use 'cd' manually."
+    echo "Available worktrees:"
+    git worktree list
+    return 1
   fi
+
+  cd "$worktree_path"
 }
 
 # gwtmv - Git Worktree Move
@@ -296,15 +332,8 @@ function gwtlock() {
   local reason="${2:-locked by user}"
 
   if [[ -z "$worktree_path" ]]; then
-    if command -v fzf &> /dev/null; then
-      # Get list of worktrees, skip the bare repo entry
-      worktree_path=$(git worktree list --porcelain | grep "worktree " | sed 's/worktree //' | grep -v '\.git$' | fzf --height 40% --reverse --prompt "Select worktree to lock: ")
-
-      if [[ -z "$worktree_path" ]]; then
-        echo "No worktree selected"
-        return 1
-      fi
-    else
+    worktree_path=$(_gwt_select_worktree "Select worktree to lock: ")
+    if [[ -z "$worktree_path" ]]; then
       echo "Usage: gwtlock <worktree-path> [reason]"
       return 1
     fi
@@ -322,15 +351,8 @@ function gwtunlock() {
   local worktree_path="$1"
 
   if [[ -z "$worktree_path" ]]; then
-    if command -v fzf &> /dev/null; then
-      # Get list of worktrees, skip the bare repo entry
-      worktree_path=$(git worktree list --porcelain | grep "worktree " | sed 's/worktree //' | grep -v '\.git$' | fzf --height 40% --reverse --prompt "Select worktree to unlock: ")
-
-      if [[ -z "$worktree_path" ]]; then
-        echo "No worktree selected"
-        return 1
-      fi
-    else
+    worktree_path=$(_gwt_select_worktree "Select worktree to unlock: ")
+    if [[ -z "$worktree_path" ]]; then
       echo "Usage: gwtunlock <worktree-path>"
       return 1
     fi
@@ -347,16 +369,14 @@ function gwtunlock() {
 # If worktree exists, cd into it. If not, create it and cd into it.
 function gwtw() {
   local branch_name="$1"
-  local base_branch="${2:-main}"
+  local base_branch="$2"
 
   if [[ -z "$branch_name" ]]; then
     if command -v fzf &> /dev/null; then
       # Get list of local and remote branches
       local branches=$(
         {
-          # Local branches
           git for-each-ref --format='%(refname:short)' refs/heads/ | sed 's/^/  /'
-          # Remote branches (exclude HEAD)
           git for-each-ref --format='%(refname:short)' refs/remotes/origin/ | grep -v '/HEAD$' | sed 's@^origin/@@' | sed 's/^/  origin\/@/'
         } | sort -u
       )
@@ -368,7 +388,6 @@ function gwtw() {
         return 1
       fi
 
-      # Strip the "origin/" prefix if present
       branch_name=$(echo "$selection" | sed 's/^  origin\///' | sed 's/^  //')
     else
       echo "Usage: gwtw <branch-name> [base-branch]"
@@ -377,11 +396,8 @@ function gwtw() {
     fi
   fi
 
-  # Find the repository root (where .git is)
-  local repo_root=$(git rev-parse --git-common-dir 2>/dev/null)
-  if [[ -n "$repo_root" ]]; then
-    repo_root=$(cd "$(dirname "$repo_root")" && pwd)
-  else
+  local repo_root=$(_gwt_repo_root)
+  if [[ -z "$repo_root" ]]; then
     repo_root=$(pwd)
   fi
 
@@ -392,23 +408,35 @@ function gwtw() {
     return 0
   fi
 
-  # Check if branch exists remotely or locally
+  # Fetch latest refs from origin so branch existence checks are current
+  echo "📡 Fetching from origin..."
+  (cd "$repo_root" && git fetch origin 2>/dev/null)
+
+  # Check if branch exists locally or remotely
   if git show-ref --verify --quiet "refs/heads/$branch_name"; then
     echo "🌿 Branch '$branch_name' exists, creating worktree..."
     (cd "$repo_root" && git worktree add "$branch_name" "$branch_name")
-    # Set up tracking if remote branch exists and not already tracking
-    if git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
-      if ! git rev-parse --abbrev-ref "$branch_name@{upstream}" &>/dev/null; then
-        echo "🔗 Setting up tracking to origin/$branch_name"
-        (cd "$repo_root/$branch_name" && git branch --set-upstream-to=origin/$branch_name)
-      fi
-    fi
+    _gwt_setup_tracking "$branch_name" "$repo_root/$branch_name"
   elif git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
     echo "🌿 Branch '$branch_name' exists on remote, creating worktree with tracking..."
     (cd "$repo_root" && git worktree add --track -b "$branch_name" "$branch_name" "origin/$branch_name")
   else
-    echo "🌱 Creating new branch '$branch_name' from $base_branch..."
-    (cd "$repo_root" && git worktree add -b "$branch_name" "$branch_name" "$base_branch")
+    # Auto-detect default branch if base not specified (only needed for new branches)
+    if [[ -z "$base_branch" ]]; then
+      base_branch=$(_gwt_default_branch)
+      if [[ -z "$base_branch" ]]; then
+        echo "❌ Could not detect default branch. Please specify: gwtw <branch> <base-branch>"
+        return 1
+      fi
+    fi
+
+    echo "🌱 Creating new branch '$branch_name' from origin/$base_branch..."
+    if git show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
+      (cd "$repo_root" && git worktree add -b "$branch_name" "$branch_name" "origin/$base_branch")
+    else
+      echo "⚠️  Remote branch 'origin/$base_branch' not found, using local '$base_branch'"
+      (cd "$repo_root" && git worktree add -b "$branch_name" "$branch_name" "$base_branch")
+    fi
   fi
 
   if [[ $? -eq 0 ]]; then
@@ -441,32 +469,19 @@ function gwtclean() {
     esac
   done
 
-  # Find the repository root
-  local repo_root=$(git rev-parse --git-common-dir 2>/dev/null)
-  if [[ -n "$repo_root" ]]; then
-    repo_root=$(cd "$(dirname "$repo_root")" && pwd)
-  else
+  local repo_root=$(_gwt_repo_root)
+  if [[ -z "$repo_root" ]]; then
     echo "❌ Not in a git repository"
     return 1
   fi
 
   # Auto-detect target branch if not specified
   if [[ -z "$target_branch" ]]; then
-    # Try to get the default branch from remote
-    target_branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
-
-    # Fallback: check for common default branch names
+    target_branch=$(_gwt_default_branch)
     if [[ -z "$target_branch" ]]; then
-      if git show-ref --verify --quiet refs/heads/main; then
-        target_branch="main"
-      elif git show-ref --verify --quiet refs/heads/master; then
-        target_branch="master"
-      else
-        echo "❌ Could not auto-detect default branch. Please specify: gwtclean <branch-name>"
-        return 1
-      fi
+      echo "❌ Could not auto-detect default branch. Please specify: gwtclean <branch-name>"
+      return 1
     fi
-
     echo "🎯 Auto-detected target branch: $target_branch"
   fi
 
@@ -494,7 +509,6 @@ function gwtclean() {
   # Classify traditionally merged branches
   while IFS= read -r branch; do
     [[ -z "$branch" ]] && continue
-    # Extra safety: never include the target branch
     [[ "$branch" == "$target_branch" ]] && continue
     merged_branches+=("$branch")
   done <<< "$traditionally_merged"
@@ -502,7 +516,6 @@ function gwtclean() {
   # Check remaining branches for squash merges and remote deletion
   while IFS= read -r branch; do
     [[ -z "$branch" ]] && continue
-    # Extra safety: never include the target branch
     [[ "$branch" == "$target_branch" ]] && continue
 
     # Skip if already in merged_branches
@@ -515,31 +528,24 @@ function gwtclean() {
     local has_upstream=false
 
     # Check if branch name appears in recent merge commits (squash merge detection)
-    # Look for patterns like "Merge pull request" or "Merge branch" with the branch name
-    # Escape special regex characters in branch name to prevent regex errors
     local escaped_branch=$(printf '%s\n' "$branch" | sed 's/[[\.*^$()+?{|]/\\&/g')
     if git log "$target_branch" --oneline --grep="$escaped_branch" -i --all-match -E -n 20 | grep -qiE "(merge|squash)"; then
       is_squash_merged=true
     fi
 
-    # Check if branch exists on remote
     if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
       remote_exists=true
     fi
 
-    # Check if branch has upstream tracking
     if git rev-parse --abbrev-ref "$branch@{upstream}" &>/dev/null; then
       has_upstream=true
     fi
 
-    # Categorize the branch
     if [[ "$is_squash_merged" == true ]]; then
       squash_merged_branches+=("$branch")
     elif [[ "$has_upstream" == true ]] && [[ "$remote_exists" == false ]]; then
-      # Branch was tracking remote but remote is deleted - likely merged
       remote_deleted_branches+=("$branch")
     elif [[ "$has_upstream" == false ]] && [[ "$remote_exists" == false ]]; then
-      # Branch never pushed and remote doesn't exist - needs confirmation
       unpushed_remote_deleted_branches+=("$branch")
     fi
   done <<< "$all_branches"
@@ -587,10 +593,8 @@ function gwtclean() {
   for branch in "${all_detected_merged[@]}"; do
     [[ -z "$branch" ]] && continue
 
-    # Check if worktree exists for this branch
     local worktree_path="$repo_root/$branch"
     if [[ -d "$worktree_path" ]]; then
-      # Verify it's actually a worktree
       if git worktree list --porcelain | grep -q "^worktree $worktree_path$"; then
         worktrees_to_remove+=("$worktree_path")
         branches_to_delete+=("$branch")
@@ -620,12 +624,10 @@ function gwtclean() {
 
       echo ""
     else
-      # In force mode, include unpushed branches with a warning
       echo "⚠️  Force mode: including unpushed branches in cleanup"
       unpushed_to_delete=("${unpushed_remote_deleted_branches[@]}")
     fi
 
-    # Add unpushed branches to the appropriate lists
     for branch in "${unpushed_to_delete[@]}"; do
       local worktree_path="$repo_root/$branch"
       if [[ -d "$worktree_path" ]] && git worktree list --porcelain | grep -q "^worktree $worktree_path$"; then
@@ -677,29 +679,14 @@ function gwtclean() {
     local branch="${branches_to_delete[$i]}"
 
     echo "🗑️  Removing worktree: $worktree_path"
+    _gwt_cleanup_shared_dirs "$worktree_path"
 
-    # Remove shared directory symlinks
-    for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
-      # Skip empty or invalid directory names
-      if [[ -z "$shared_dir" ]] || [[ "$shared_dir" == "()" ]]; then
-        continue
-      fi
-
-      local symlink_path="$worktree_path/$shared_dir"
-      if [[ -L "$symlink_path" ]]; then
-        rm "$symlink_path"
-      fi
-    done
-
-    # Remove worktree
     if git worktree remove "$worktree_path" 2>/dev/null; then
-      # Delete branch (force delete since worktree was just removed)
       echo "🗑️  Deleting branch: $branch"
       git branch -D "$branch" 2>/dev/null && ((removed_count++))
     fi
   done
 
-  # Delete branches without worktrees (force delete since already confirmed merged)
   for branch in "${branches_without_worktrees[@]}"; do
     echo "🗑️  Deleting branch: $branch"
     git branch -D "$branch" 2>/dev/null && ((removed_count++))
