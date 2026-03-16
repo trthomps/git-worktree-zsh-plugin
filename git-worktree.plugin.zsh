@@ -446,6 +446,34 @@ function gwtw() {
   fi
 }
 
+# gwtu - Git Worktree Update
+# Fetch latest from origin and rebase the current branch onto the default branch
+# Usage: gwtu [base-branch]
+# Auto-detects the default branch if not specified
+function gwtu() {
+  local base_branch="$1"
+  local current_branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+  if [[ -z "$current_branch" ]]; then
+    echo "❌ Not on a branch (detached HEAD)"
+    return 1
+  fi
+
+  if [[ -z "$base_branch" ]]; then
+    base_branch=$(_gwt_default_branch)
+    if [[ -z "$base_branch" ]]; then
+      echo "❌ Could not detect default branch. Please specify: gwtu <base-branch>"
+      return 1
+    fi
+  fi
+
+  echo "📡 Fetching latest '$base_branch' from origin..."
+  git fetch origin "$base_branch" || return 1
+
+  echo "🔄 Rebasing '$current_branch' onto origin/$base_branch..."
+  git rebase "origin/$base_branch"
+}
+
 # gwtclean - Git Worktree Clean
 # Clean up worktrees for branches that have been merged
 # Usage: gwtclean [target-branch] [-f]
@@ -701,3 +729,4 @@ alias gwt="git worktree"
 alias gwtls="gwtl"
 alias gwtrp="gwtp"
 alias gwtcl="gwtclean"
+alias gwtup="gwtu"
