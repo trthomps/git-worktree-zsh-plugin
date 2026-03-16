@@ -196,7 +196,7 @@ gwta <branch-name> [-b] [base-branch]
 # Create worktree for existing branch
 gwta feature/new-feature
 
-# Create new branch and worktree from main
+# Create new branch and worktree from main (fetches latest from origin first)
 gwta feature/new-feature -b main
 
 # Create new branch and worktree from current HEAD
@@ -230,7 +230,8 @@ gwtw
 - If worktree exists: switches to it
 - If branch exists locally: creates worktree and checks it out
 - If branch exists on remote: creates worktree and tracks remote branch
-- If branch doesn't exist: creates new branch from base-branch (defaults to main)
+- If branch doesn't exist: creates new branch from base-branch (auto-detects main/master)
+- Fetches from origin before checking branch existence so remote refs are always current
 
 **Note:** If no branch is provided and fzf is installed, an interactive branch selector will appear showing both local and remote branches. You can also type a new branch name in fzf to create it.
 
@@ -383,6 +384,28 @@ gwtunlock
 
 ---
 
+### `gwtu` - Git Worktree Update
+
+Fetch the latest from origin and rebase the current branch onto the default branch. Auto-detects the default branch (main/master) if not specified.
+
+**Usage:**
+```bash
+gwtu [base-branch]
+```
+
+**Examples:**
+```bash
+# Rebase onto the auto-detected default branch
+gwtu
+
+# Rebase onto a specific branch
+gwtu develop
+```
+
+**Alias:** `gwtup`
+
+---
+
 ### `gwtclean` - Git Worktree Clean
 
 Clean up worktrees and branches that have been merged into the default branch. Automatically detects the default branch (main/master) or you can specify a target branch. **Supports detection of squash merges!**
@@ -441,6 +464,7 @@ The plugin also provides some convenient aliases:
 - `gwtls` → `gwtl` (list worktrees)
 - `gwtrp` → `gwtp` (prune worktrees)
 - `gwtcl` → `gwtclean` (clean merged branches)
+- `gwtup` → `gwtu` (fetch and rebase onto default branch)
 
 ## License
 
