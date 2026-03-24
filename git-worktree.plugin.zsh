@@ -117,6 +117,34 @@ function _gwt_setup_shared_dirs() {
   done
 }
 
+# _gwt_setup_zed_project_name - Initialize .zed/settings.json with project_name if missing
+# Requires .zed to already exist in the worktree (e.g. via GWT_SHARED_DIRS)
+# Usage: _gwt_setup_zed_project_name <worktree-path>
+function _gwt_setup_zed_project_name() {
+  local worktree_path="$1"
+  local zed_dir="$worktree_path/.zed"
+
+  # Only act if .zed exists (directory or symlink)
+  if [[ ! -d "$zed_dir" ]]; then
+    return 0
+  fi
+
+  local settings_file="$zed_dir/settings.json"
+  if [[ -e "$settings_file" ]]; then
+    return 0
+  fi
+
+  local repo_root=$(_gwt_repo_root) || return 1
+  local project_name=$(basename "$repo_root")
+
+  echo "  📝 Initializing .zed/settings.json with project_name: $project_name"
+  cat > "$settings_file" <<EOF
+{
+  "project_name": "$project_name"
+}
+EOF
+}
+
 # _gwt_setup_tracking - Set up branch tracking to origin if applicable
 # Usage: _gwt_setup_tracking <branch-name> <worktree-path>
 function _gwt_setup_tracking() {
@@ -180,6 +208,7 @@ function gwtc() {
 
   local worktree_full_path="$(pwd)/$default_branch"
   _gwt_setup_shared_dirs "$worktree_full_path"
+  _gwt_setup_zed_project_name "$worktree_full_path"
 
   cd "$default_branch" || return 1
 
@@ -236,6 +265,7 @@ function gwta() {
   if [[ $? -eq 0 ]]; then
     echo "✅ Worktree created at: $repo_root/$branch_name"
     _gwt_setup_shared_dirs "$repo_root/$branch_name"
+    _gwt_setup_zed_project_name "$repo_root/$branch_name"
   fi
 }
 
@@ -442,6 +472,7 @@ function gwtw() {
   if [[ $? -eq 0 ]]; then
     echo "✅ Worktree ready at: $repo_root/$branch_name"
     _gwt_setup_shared_dirs "$repo_root/$branch_name"
+    _gwt_setup_zed_project_name "$repo_root/$branch_name"
     cd "$repo_root/$branch_name"
   fi
 }
