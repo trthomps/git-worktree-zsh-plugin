@@ -259,8 +259,25 @@ function _gwt_cow_populate() {
     "${cp_cmd[@]}" "$item" "$new_wt/$name"
   done
 
-  # Reconcile: populate index from HEAD, then checkout to fix differing files
-  (cd "$new_wt" && git reset && git checkout -- .) 2>/dev/null
+  # Reconcile: populate index from HEAD, then only checkout files that
+  # actually differ between the two commits. A blanket `git checkout -- .`
+  # would re-trigger LFS smudge filters on every file, breaking reflinks.
+  local ref_commit=$(git -C "$ref_wt" rev-parse HEAD 2>/dev/null)
+  local new_commit=$(git -C "$new_wt" rev-parse HEAD 2>/dev/null)
+
+  (cd "$new_wt" && git reset) 2>/dev/null
+
+  if [[ -n "$ref_commit" ]] && [[ -n "$new_commit" ]] && [[ "$ref_commit" != "$new_commit" ]]; then
+    # Only checkout files that differ between the two trees
+    local diff_files
+    diff_files=$(git diff-tree -r --name-only --no-commit-id "$ref_commit" "$new_commit" 2>/dev/null)
+    if [[ -n "$diff_files" ]]; then
+      echo "$diff_files" | (cd "$new_wt" && xargs git checkout HEAD --)
+    fi
+  fi
+
+  # Refresh index stat cache to match the CoW-copied files
+  (cd "$new_wt" && git update-index --refresh) 2>/dev/null
 }
 
 # _gwt_add_worktree - Create a worktree, using CoW when possible
