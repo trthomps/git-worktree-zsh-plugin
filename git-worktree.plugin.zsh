@@ -10,6 +10,15 @@ if [[ ! -v GWT_SHARED_DIRS ]]; then
   GWT_SHARED_DIRS=()
 fi
 
+# Configuration: Copy-on-Write mode for worktree checkout
+# Uses filesystem reflinks (APFS cp -c / Linux cp --reflink) to avoid
+# duplicating files across worktrees. Huge savings for repos with large/LFS files.
+# Values: "auto" (detect filesystem support), "on" (force, fail if unsupported), "off"
+# Can be set in .zshrc before or after this plugin loads
+if [[ ! -v GWT_COW ]]; then
+  GWT_COW="auto"
+fi
+
 # --- Internal helpers ---
 
 # _gwt_repo_root - Resolve the bare repository root (parent of .git)
@@ -159,6 +168,179 @@ function _gwt_setup_tracking() {
   fi
 }
 
+# --- Copy-on-Write helpers ---
+
+# _gwt_cow_supported - Test whether the filesystem supports reflink copies
+# Caches result per repo root for the shell session.
+# Returns 0 if reflinks work, 1 otherwise.
+function _gwt_cow_supported() {
+  local repo_root=$(_gwt_repo_root) || return 1
+
+  # Check session cache
+  local cache_key="_gwt_cow_cache_${repo_root:gs/\//_}"
+  if [[ -v $cache_key ]]; then
+    return ${(P)cache_key}
+  fi
+
+  local test_src=$(mktemp "$repo_root/.gwt_cow_test_XXXXXX") || return 1
+  local test_dst="${test_src}.clone"
+  local result=1
+
+  echo "test" > "$test_src"
+  if [[ "$OSTYPE" == darwin* ]]; then
+    cp -c "$test_src" "$test_dst" 2>/dev/null && result=0
+  else
+    cp --reflink=always "$test_src" "$test_dst" 2>/dev/null && result=0
+  fi
+
+  rm -f "$test_src" "$test_dst"
+  typeset -g "$cache_key=$result"
+  return $result
+}
+
+# _gwt_find_reference_worktree - Find the best existing worktree to CoW-copy from
+# Prefers the default branch worktree since most branches fork from it.
+# Prints the path to stdout. Returns 1 if no suitable reference found.
+function _gwt_find_reference_worktree() {
+  local repo_root=$(_gwt_repo_root) || return 1
+
+  # Prefer the default branch worktree
+  local default_branch=$(_gwt_default_branch)
+  if [[ -n "$default_branch" ]] && [[ -d "$repo_root/$default_branch" ]]; then
+    echo "$repo_root/$default_branch"
+    return 0
+  fi
+
+  # Fall back to any existing worktree (skip the bare .git dir)
+  local wt_path
+  local worktree_output=$(git worktree list --porcelain)
+  while IFS= read -r line; do
+    if [[ "$line" == worktree\ * ]]; then
+      wt_path="${line#worktree }"
+      if [[ -d "$wt_path" ]] && [[ "$wt_path" != "$repo_root" ]]; then
+        echo "$wt_path"
+        return 0
+      fi
+    fi
+  done <<< "$worktree_output"
+
+  return 1
+}
+
+# _gwt_cow_populate - CoW-copy files from reference worktree, then reconcile
+# Usage: _gwt_cow_populate <new-worktree-path> <reference-worktree-path>
+function _gwt_cow_populate() {
+  local new_wt="$1"
+  local ref_wt="$2"
+
+  if [[ ! -d "$new_wt" ]] || [[ ! -d "$ref_wt" ]]; then
+    return 1
+  fi
+
+  # Build skip set from GWT_SHARED_DIRS
+  local -A skip_set
+  skip_set[.git]=1
+  for shared_dir in "${GWT_SHARED_DIRS[@]}"; do
+    [[ -n "$shared_dir" ]] && skip_set[${shared_dir%%/*}]=1
+  done
+
+  # CoW-copy each top-level item from reference worktree
+  local cp_cmd
+  if [[ "$OSTYPE" == darwin* ]]; then
+    cp_cmd=(cp -Rc)
+  else
+    cp_cmd=(cp -R --reflink=auto)
+  fi
+
+  local item name
+  for item in "$ref_wt"/*(DN); do
+    name=$(basename "$item")
+    (( ${+skip_set[$name]} )) && continue
+    "${cp_cmd[@]}" "$item" "$new_wt/$name"
+  done
+
+  # Reconcile: populate index from HEAD, then checkout to fix differing files
+  (cd "$new_wt" && git reset && git checkout -- .) 2>/dev/null
+}
+
+# _gwt_add_worktree - Create a worktree, using CoW when possible
+# Wraps `git worktree add` with optional CoW optimization.
+# Usage: _gwt_add_worktree <git-worktree-add-args...>
+# The last positional arg that looks like a path is treated as the worktree path.
+function _gwt_add_worktree() {
+  local repo_root=$(_gwt_repo_root) || repo_root=$(pwd)
+  local use_cow=false
+
+  # Determine if we should attempt CoW
+  if [[ "$GWT_COW" == "on" ]]; then
+    if ! _gwt_cow_supported; then
+      echo "❌ GWT_COW=on but filesystem does not support reflinks"
+      return 1
+    fi
+    use_cow=true
+  elif [[ "$GWT_COW" == "auto" ]]; then
+    _gwt_cow_supported && use_cow=true
+  fi
+
+  local ref_wt=""
+  if $use_cow; then
+    ref_wt=$(_gwt_find_reference_worktree)
+    if [[ -z "$ref_wt" ]]; then
+      use_cow=false
+    fi
+  fi
+
+  if $use_cow; then
+    echo "🐄 Using Copy-on-Write from $(basename "$ref_wt")"
+    # Insert --no-checkout after "add" in the args
+    local args=()
+    local found_add=false
+    for arg in "$@"; do
+      args+=("$arg")
+      if [[ "$found_add" == false ]] && [[ "$arg" == "add" ]]; then
+        args+=(--no-checkout)
+        found_add=true
+      fi
+    done
+
+    # If no "add" was found, the caller passed args without "add" prefix
+    # (they expect us to prepend it)
+    if [[ "$found_add" == false ]]; then
+      args=(add --no-checkout "$@")
+    fi
+
+    (cd "$repo_root" && git worktree "${args[@]}") || return 1
+
+    # Determine the worktree path from the args
+    # git worktree add [flags] [-b <branch>] <path> [<commit-ish>]
+    local wt_path=""
+    local past_add=false
+    local skip_next=false
+    for arg in "${args[@]}"; do
+      if $skip_next; then skip_next=false; continue; fi
+      [[ "$arg" == "add" ]] && past_add=true && continue
+      $past_add || continue
+      [[ "$arg" == --* ]] && continue
+      # -b takes the next arg as branch name, skip both
+      if [[ "$arg" == "-b" ]]; then skip_next=true; continue; fi
+      [[ "$arg" == -* ]] && continue
+      # First positional arg after add and flags is the path
+      if [[ -z "$wt_path" ]]; then
+        wt_path="$arg"
+      fi
+    done
+
+    if [[ -n "$wt_path" ]] && [[ -d "$repo_root/$wt_path" ]]; then
+      _gwt_cow_populate "$repo_root/$wt_path" "$ref_wt" || {
+        echo "⚠️  CoW populate failed, falling back to normal checkout"
+        (cd "$repo_root/$wt_path" && git checkout -f HEAD)
+      }
+    fi
+  else
+    (cd "$repo_root" && git worktree "$@") || return 1
+  fi
+}
+
 # --- Public commands ---
 
 # gwtc - Git Worktree Clone
@@ -183,6 +365,10 @@ function gwtc() {
 
   # Configure remote to fetch all branches (bare clones don't set this up by default)
   git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
+
+  # Fetch to populate refs/remotes/origin/* (bare clone only has refs/heads/*)
+  echo "📡 Fetching remote refs..."
+  git fetch origin || return 1
 
   # Get the default branch name by querying the remote
   local default_branch=$(git ls-remote --symref origin HEAD | awk '/^ref:/ {sub(/refs\/heads\//, "", $2); print $2}')
@@ -233,6 +419,7 @@ function gwta() {
     repo_root=$(pwd)
   fi
 
+  local wt_ok=false
   if [[ "$2" == "-b" ]]; then
     local base_branch="${3:-HEAD}"
     # Fetch the latest base branch from origin before branching
@@ -241,28 +428,28 @@ function gwta() {
       (cd "$repo_root" && git fetch origin "$base_branch" 2>/dev/null)
       if git show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
         echo "🌱 Creating new branch '$branch_name' from origin/$base_branch"
-        (cd "$repo_root" && git worktree add -b "$branch_name" "$branch_name" "origin/$base_branch")
+        _gwt_add_worktree add -b "$branch_name" "$branch_name" "origin/$base_branch" && wt_ok=true
       else
         echo "⚠️  Remote branch 'origin/$base_branch' not found, using local '$base_branch'"
-        (cd "$repo_root" && git worktree add -b "$branch_name" "$branch_name" "$base_branch")
+        _gwt_add_worktree add -b "$branch_name" "$branch_name" "$base_branch" && wt_ok=true
       fi
     else
       echo "🌱 Creating new branch '$branch_name' from $base_branch"
-      (cd "$repo_root" && git worktree add -b "$branch_name" "$branch_name" "$base_branch")
+      _gwt_add_worktree add -b "$branch_name" "$branch_name" "$base_branch" && wt_ok=true
     fi
   elif git show-ref --verify --quiet "refs/heads/$branch_name"; then
     echo "🌿 Checking out existing branch '$branch_name'"
-    (cd "$repo_root" && git worktree add "$branch_name" "$branch_name")
-    _gwt_setup_tracking "$branch_name" "$repo_root/$branch_name"
+    _gwt_add_worktree add "$branch_name" "$branch_name" && wt_ok=true
+    $wt_ok && _gwt_setup_tracking "$branch_name" "$repo_root/$branch_name"
   elif git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
     echo "🌿 Branch '$branch_name' exists on remote, creating worktree with tracking..."
-    (cd "$repo_root" && git worktree add --track -b "$branch_name" "$branch_name" "origin/$branch_name")
+    _gwt_add_worktree add --track -b "$branch_name" "$branch_name" "origin/$branch_name" && wt_ok=true
   else
     echo "❌ Branch '$branch_name' doesn't exist. Use 'gwta $branch_name -b' to create it."
     return 1
   fi
 
-  if [[ $? -eq 0 ]]; then
+  if $wt_ok; then
     echo "✅ Worktree created at: $repo_root/$branch_name"
     _gwt_setup_shared_dirs "$repo_root/$branch_name"
     _gwt_setup_zed_project_name "$repo_root/$branch_name"
@@ -443,13 +630,14 @@ function gwtw() {
   (cd "$repo_root" && git fetch origin 2>/dev/null)
 
   # Check if branch exists locally or remotely
+  local wt_ok=false
   if git show-ref --verify --quiet "refs/heads/$branch_name"; then
     echo "🌿 Branch '$branch_name' exists, creating worktree..."
-    (cd "$repo_root" && git worktree add "$branch_name" "$branch_name")
-    _gwt_setup_tracking "$branch_name" "$repo_root/$branch_name"
+    _gwt_add_worktree add "$branch_name" "$branch_name" && wt_ok=true
+    $wt_ok && _gwt_setup_tracking "$branch_name" "$repo_root/$branch_name"
   elif git show-ref --verify --quiet "refs/remotes/origin/$branch_name"; then
     echo "🌿 Branch '$branch_name' exists on remote, creating worktree with tracking..."
-    (cd "$repo_root" && git worktree add --track -b "$branch_name" "$branch_name" "origin/$branch_name")
+    _gwt_add_worktree add --track -b "$branch_name" "$branch_name" "origin/$branch_name" && wt_ok=true
   else
     # Auto-detect default branch if base not specified (only needed for new branches)
     if [[ -z "$base_branch" ]]; then
@@ -462,14 +650,14 @@ function gwtw() {
 
     echo "🌱 Creating new branch '$branch_name' from origin/$base_branch..."
     if git show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
-      (cd "$repo_root" && git worktree add -b "$branch_name" "$branch_name" "origin/$base_branch")
+      _gwt_add_worktree add -b "$branch_name" "$branch_name" "origin/$base_branch" && wt_ok=true
     else
       echo "⚠️  Remote branch 'origin/$base_branch' not found, using local '$base_branch'"
-      (cd "$repo_root" && git worktree add -b "$branch_name" "$branch_name" "$base_branch")
+      _gwt_add_worktree add -b "$branch_name" "$branch_name" "$base_branch" && wt_ok=true
     fi
   fi
 
-  if [[ $? -eq 0 ]]; then
+  if $wt_ok; then
     echo "✅ Worktree ready at: $repo_root/$branch_name"
     _gwt_setup_shared_dirs "$repo_root/$branch_name"
     _gwt_setup_zed_project_name "$repo_root/$branch_name"
