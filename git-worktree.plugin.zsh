@@ -366,7 +366,13 @@ function gwtc() {
   # Configure remote to fetch all branches (bare clones don't set this up by default)
   git config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
 
-  # Fetch to populate refs/remotes/origin/* (bare clone only has refs/heads/*)
+  # Bare clone puts branches under refs/heads/* which conflict with worktree branch
+  # creation. Remove them so they only exist as remote tracking refs after fetch.
+  git for-each-ref --format='%(refname)' refs/heads/ | while IFS= read -r ref; do
+    git update-ref -d "$ref"
+  done
+
+  # Fetch to populate refs/remotes/origin/* cleanly
   echo "📡 Fetching remote refs..."
   git fetch origin || return 1
 
