@@ -177,7 +177,7 @@ function _gwt_cow_supported() {
   local repo_root=$(_gwt_repo_root) || return 1
 
   # Check session cache
-  local cache_key="_gwt_cow_cache_${repo_root:gs/\//_}"
+  local cache_key="_gwt_cow_cache_${${repo_root//[^a-zA-Z0-9]/_}}"
   if [[ -v $cache_key ]]; then
     return ${(P)cache_key}
   fi
