@@ -60,6 +60,7 @@ gwtp
 2. **Parallel work**: Run tests on one branch while developing on another
 3. **Easy comparison**: Have two branches open side-by-side for easy comparison
 4. **Cleaner workflow**: No need to stash changes when switching branches
+5. **Disk-efficient**: Copy-on-Write support means new worktrees share storage with existing ones — critical for large repos with LFS files
 
 
 ## Installation
@@ -150,6 +151,44 @@ my-repo/
 - IDE settings and configurations stay consistent across branches
 - Build caches (`node_modules`, `.gradle`, etc.) are shared, saving disk space
 - Claude Code and other tool configurations don't need to be reconfigured per branch
+
+### Copy-on-Write (CoW)
+
+For large repositories — especially those with Git LFS files — each worktree normally duplicates every file on disk. With CoW enabled, new worktrees use filesystem reflinks to share storage with an existing worktree. Files only consume additional disk space when they are actually modified.
+
+This works on APFS (macOS), btrfs, and XFS (Linux) filesystems.
+
+**Setup:**
+
+Add the following to your `~/.zshrc` before loading the plugin:
+
+```bash
+# "auto" (default) - detect filesystem support and use if available
+# "on"  - require reflinks, fail if unsupported
+# "off" - disable, always do a full checkout
+GWT_COW="auto"
+
+plugins=(... git-worktree)
+```
+
+**How it works:**
+
+1. When creating a worktree (via `gwta` or `gwtw`), the plugin tests whether the filesystem supports reflinks
+2. If supported, it finds the best reference worktree (prefers the default branch) and creates the new worktree with `--no-checkout`
+3. Files are CoW-copied from the reference worktree using `cp -c` (macOS) or `cp --reflink=auto` (Linux)
+4. `git checkout` reconciles any files that differ between branches — identical files remain as zero-cost reflink clones
+
+**Note:** `gwtc` (initial clone) always does a normal checkout since there is no reference worktree to copy from.
+
+### Zed Editor Support
+
+When `.zed` is included in `GWT_SHARED_DIRS`, the plugin automatically initializes `.zed/settings.json` with a `project_name` matching the repository name. This ensures Zed displays the repo name in its UI instead of the worktree branch directory name.
+
+```bash
+GWT_SHARED_DIRS=(.zed .claude .idea)
+```
+
+The `project_name` is only written when `.zed/settings.json` does not already exist, so your custom settings are never overwritten.
 
 ## Commands
 
