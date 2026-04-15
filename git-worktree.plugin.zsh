@@ -52,6 +52,23 @@ function _gwt_default_branch() {
   fi
 }
 
+# _gwt_ensure_fetch_refspec - Ensure `origin` has a fetch refspec
+# `git clone --bare` does not set a fetch refspec by default, which means
+# `git fetch origin` silently fails to update refs/remotes/origin/*. Every
+# branch-existence check in this plugin depends on those tracking refs, so
+# without a refspec, `gwtw <existing-remote-branch>` mistakenly falls through
+# to "create new branch from origin/main" and silently creates stale state.
+# If no fetch refspec is configured at all, add the standard broad one.
+function _gwt_ensure_fetch_refspec() {
+  local repo_root=$(_gwt_repo_root) || return 1
+  local refspecs
+  refspecs=$(cd "$repo_root" && git config --get-all remote.origin.fetch 2>/dev/null)
+  if [[ -z "$refspecs" ]]; then
+    echo "🔧 Adding missing fetch refspec to origin (bare-clone default)"
+    (cd "$repo_root" && git config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*')
+  fi
+}
+
 # _gwt_select_worktree - Interactive worktree selector via fzf
 # Usage: _gwt_select_worktree <prompt>
 # Prints the selected worktree path to stdout. Returns 1 if nothing selected or fzf unavailable.
@@ -268,11 +285,20 @@ function _gwt_cow_populate() {
   (cd "$new_wt" && git reset) 2>/dev/null
 
   if [[ -n "$ref_commit" ]] && [[ -n "$new_commit" ]] && [[ "$ref_commit" != "$new_commit" ]]; then
-    # Only checkout files that differ between the two trees
-    local diff_files
-    diff_files=$(git diff-tree -r --name-only --no-commit-id "$ref_commit" "$new_commit" 2>/dev/null)
-    if [[ -n "$diff_files" ]]; then
-      echo "$diff_files" | (cd "$new_wt" && xargs git checkout HEAD --)
+    # Only reconcile files that differ between the two trees. Paths that exist
+    # in new_commit get checked out; paths that only existed in ref_commit
+    # (deletions) get removed. Doing a blanket `git checkout HEAD -- <path>`
+    # fails with "pathspec did not match any file(s) known to git" for
+    # deleted paths, which is how we were leaving stale files behind before.
+    local to_checkout to_remove
+    to_checkout=$(git diff-tree -r --name-only --no-commit-id --diff-filter=d "$ref_commit" "$new_commit" 2>/dev/null)
+    to_remove=$(git diff-tree -r --name-only --no-commit-id --diff-filter=D "$ref_commit" "$new_commit" 2>/dev/null)
+
+    if [[ -n "$to_remove" ]]; then
+      echo "$to_remove" | (cd "$new_wt" && xargs rm -f)
+    fi
+    if [[ -n "$to_checkout" ]]; then
+      echo "$to_checkout" | (cd "$new_wt" && xargs git checkout HEAD --)
     fi
   fi
 
@@ -350,7 +376,11 @@ function _gwt_add_worktree() {
     if [[ -n "$wt_path" ]] && [[ -d "$repo_root/$wt_path" ]]; then
       _gwt_cow_populate "$repo_root/$wt_path" "$ref_wt" || {
         echo "⚠️  CoW populate failed, falling back to normal checkout"
-        (cd "$repo_root/$wt_path" && git checkout -f HEAD)
+        # `git checkout -f HEAD` restores tracked files but leaves any
+        # CoW-copied files that aren't in HEAD sitting around as untracked,
+        # which blocks subsequent `git pull`. Reset + clean gets back to a
+        # pristine checkout of HEAD.
+        (cd "$repo_root/$wt_path" && git reset --hard HEAD && git clean -fd)
       }
     fi
   else
@@ -441,6 +471,8 @@ function gwta() {
   if [[ -z "$repo_root" ]]; then
     repo_root=$(pwd)
   fi
+
+  _gwt_ensure_fetch_refspec
 
   local wt_ok=false
   if [[ "$2" == "-b" ]]; then
@@ -649,6 +681,7 @@ function gwtw() {
   fi
 
   # Fetch latest refs from origin so branch existence checks are current
+  _gwt_ensure_fetch_refspec
   echo "📡 Fetching from origin..."
   (cd "$repo_root" && git fetch origin 2>/dev/null)
 
@@ -708,6 +741,8 @@ function gwtu() {
       return 1
     fi
   fi
+
+  _gwt_ensure_fetch_refspec
 
   echo "📡 Fetching latest '$base_branch' from origin..."
   git fetch origin "$base_branch" || return 1
