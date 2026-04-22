@@ -38,6 +38,10 @@ function _gwt_repo_root() {
 function _gwt_default_branch() {
   local branch
   branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+  if [[ -z "$branch" ]] && typeset -f _gwt_set_remote_heads &>/dev/null; then
+    _gwt_set_remote_heads
+    branch=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@')
+  fi
   if [[ -n "$branch" ]]; then
     echo "$branch"
     return 0
@@ -67,6 +71,22 @@ function _gwt_ensure_fetch_refspec() {
     echo "🔧 Adding missing fetch refspec to origin (bare-clone default)"
     (cd "$repo_root" && git config --add remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*')
   fi
+}
+
+# _gwt_set_remote_heads - Set refs/remotes/<remote>/HEAD for every remote
+# Bare clones don't populate these symrefs, so `_gwt_default_branch` can't
+# find the repo's default branch when it isn't named main or master (e.g.
+# "dev"). Skips remotes whose HEAD is already set to avoid network calls.
+function _gwt_set_remote_heads() {
+  local repo_root=$(_gwt_repo_root) || return 1
+  local r
+  for r in $(cd "$repo_root" && git remote); do
+    if git -C "$repo_root" symbolic-ref "refs/remotes/$r/HEAD" &>/dev/null; then
+      continue
+    fi
+    echo "🔧 Setting $r/HEAD symref"
+    (cd "$repo_root" && git remote set-head "$r" --auto >/dev/null 2>&1)
+  done
 }
 
 # _gwt_select_worktree - Interactive worktree selector via fzf
@@ -422,6 +442,11 @@ function gwtc() {
   # Fetch to populate refs/remotes/origin/* cleanly
   echo "📡 Fetching remote refs..."
   git fetch origin || return 1
+
+  # Set refs/remotes/*/HEAD so `_gwt_default_branch` can find the default
+  # branch. Bare clones don't populate this, and detection fails for repos
+  # whose default isn't main/master (e.g. "dev").
+  _gwt_set_remote_heads
 
   # Get the default branch name by querying the remote
   local default_branch=$(git ls-remote --symref origin HEAD | awk '/^ref:/ {sub(/refs\/heads\//, "", $2); print $2}')
