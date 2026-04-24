@@ -660,7 +660,7 @@ function gwtw() {
         return 1
       fi
 
-      branch_name=$(echo "$selection" | sed 's/^  origin\///' | sed 's/^  //')
+      branch_name=$(echo "$selection" | sed 's/^  origin\/@//' | sed 's/^  //')
     else
       echo "Usage: gwtw <branch-name> [base-branch]"
       echo "Example: gwtw travis/plat-934-non-deterministic-behavior"
