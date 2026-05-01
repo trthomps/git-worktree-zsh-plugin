@@ -508,14 +508,14 @@ function gwta() {
       (cd "$repo_root" && git fetch origin "$base_branch" 2>/dev/null)
       if git show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
         echo "🌱 Creating new branch '$branch_name' from origin/$base_branch"
-        _gwt_add_worktree add -b "$branch_name" "$branch_name" "origin/$base_branch" && wt_ok=true
+        _gwt_add_worktree add --no-track -b "$branch_name" "$branch_name" "origin/$base_branch" && wt_ok=true
       else
         echo "⚠️  Remote branch 'origin/$base_branch' not found, using local '$base_branch'"
-        _gwt_add_worktree add -b "$branch_name" "$branch_name" "$base_branch" && wt_ok=true
+        _gwt_add_worktree add --no-track -b "$branch_name" "$branch_name" "$base_branch" && wt_ok=true
       fi
     else
       echo "🌱 Creating new branch '$branch_name' from $base_branch"
-      _gwt_add_worktree add -b "$branch_name" "$branch_name" "$base_branch" && wt_ok=true
+      _gwt_add_worktree add --no-track -b "$branch_name" "$branch_name" "$base_branch" && wt_ok=true
     fi
   elif git show-ref --verify --quiet "refs/heads/$branch_name"; then
     echo "🌿 Checking out existing branch '$branch_name'"
@@ -731,10 +731,10 @@ function gwtw() {
 
     echo "🌱 Creating new branch '$branch_name' from origin/$base_branch..."
     if git show-ref --verify --quiet "refs/remotes/origin/$base_branch"; then
-      _gwt_add_worktree add -b "$branch_name" "$branch_name" "origin/$base_branch" && wt_ok=true
+      _gwt_add_worktree add --no-track -b "$branch_name" "$branch_name" "origin/$base_branch" && wt_ok=true
     else
       echo "⚠️  Remote branch 'origin/$base_branch' not found, using local '$base_branch'"
-      _gwt_add_worktree add -b "$branch_name" "$branch_name" "$base_branch" && wt_ok=true
+      _gwt_add_worktree add --no-track -b "$branch_name" "$branch_name" "$base_branch" && wt_ok=true
     fi
   fi
 
